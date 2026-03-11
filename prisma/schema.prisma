@@ -1,0 +1,324 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserType {
+  CONTRACTOR
+  SUBCONTRACTOR
+  TEAM
+  ADMIN
+  OPERATOR
+}
+
+enum ContractStatus {
+  DRAFT
+  OPEN_FOR_BIDS
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum BidStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  WITHDRAWN
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum ComplaintStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  REJECTED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  phone        String?
+  passwordHash String
+
+  userType UserType?
+
+  emailVerified DateTime?
+
+  username  String? @unique
+  bio       String?
+  logoUrl   String?
+  bannerUrl String?
+
+  companyName           String?
+  companyTaxOffice      String?
+  companyTaxNumber      String? @unique
+  authorizedPersonName  String?
+  authorizedPersonPhone String?
+
+  signatureAuthDocUrl        String?
+  taxCertificateDocUrl       String?
+  tradeRegistryGazetteDocUrl String?
+
+  tokenBalance      Int @default(0)
+  freeContractsUsed Int @default(0)
+
+  isVerified Boolean @default(false)
+
+  contractsCreated  Contract[]               @relation("UserContractsCreated")
+  contractsAsClient Contract[]               @relation("UserContractsAsClient")
+  bids              Bid[]
+  messagesSent      Message[]                @relation("MessagesSent")
+  messagesReceived  Message[]                @relation("MessagesReceived")
+  complaints        Complaint[]
+  payments          Payment[]
+  ads               Ad[]
+  contactRequests   ContactRequest[]
+  emailTokens       EmailVerificationToken[]
+  comments          Comment[]
+  teamsLed          Team[]
+  teamMemberships   TeamMember[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Team {
+  id        String   @id @default(cuid())
+  name      String
+  leaderId  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  leader  User         @relation(fields: [leaderId], references: [id])
+  members TeamMember[]
+}
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  teamId    String
+  fullName  String
+  email     String?
+  phone     String?
+  role      String?
+  createdAt DateTime @default(now())
+
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+}
+
+model Contract {
+  id          String         @id @default(cuid())
+  title       String
+  description String?
+  status      ContractStatus @default(DRAFT)
+
+  contractor   User?  @relation("UserContractsCreated", fields: [contractorId], references: [id])
+  contractorId String?
+
+  client   User?  @relation("UserContractsAsClient", fields: [clientId], references: [id])
+  clientId String?
+
+  budget   Int?
+  currency String?
+  startsAt DateTime?
+  totalDays Int?
+  endsAt   DateTime?
+
+  dwgFiles String?
+  imageUrls String?
+
+  bids       Bid[]
+  comments   Comment[]
+  messages   Message[]
+  complaints Complaint[]
+  payments   Payment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Bid {
+  id       String    @id @default(cuid())
+  amount   Int
+  currency String?
+  status   BidStatus @default(PENDING)
+
+  contract   Contract @relation(fields: [contractId], references: [id])
+  contractId String
+
+  bidder   User   @relation(fields: [bidderId], references: [id])
+  bidderId String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Comment {
+  id      String @id @default(cuid())
+  content String
+
+  contract   Contract @relation(fields: [contractId], references: [id])
+  contractId String
+
+  author   User?  @relation(fields: [authorId], references: [id])
+  authorId String?
+
+  createdAt DateTime @default(now())
+}
+
+model Complaint {
+  id          String          @id @default(cuid())
+  title       String
+  description String?
+  status      ComplaintStatus @default(OPEN)
+
+  contract   Contract? @relation(fields: [contractId], references: [id])
+  contractId String?
+
+  user   User?  @relation(fields: [userId], references: [id])
+  userId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Message {
+  id      String @id @default(cuid())
+  content String
+
+  contract   Contract? @relation(fields: [contractId], references: [id])
+  contractId String?
+
+  sender   User   @relation("MessagesSent", fields: [senderId], references: [id])
+  senderId String
+
+  recipient   User   @relation("MessagesReceived", fields: [recipientId], references: [id])
+  recipientId String
+
+  createdAt DateTime @default(now())
+}
+
+model Payment {
+  id       String        @id @default(cuid())
+  amount   Int
+  currency String?
+  status   PaymentStatus @default(PENDING)
+
+  user   User?  @relation(fields: [userId], references: [id])
+  userId String?
+
+  contract   Contract? @relation(fields: [contractId], references: [id])
+  contractId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ContactRequest {
+  id      String @id @default(cuid())
+  name    String
+  email   String
+  message String
+
+  user   User?  @relation(fields: [userId], references: [id])
+  userId String?
+
+  createdAt DateTime @default(now())
+}
+
+model Ad {
+  id       String  @id @default(cuid())
+  title    String
+  content  String?
+  imageUrl String?
+  linkUrl  String?
+  isActive Boolean @default(true)
+
+  owner   User?  @relation(fields: [ownerId], references: [id])
+  ownerId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model EmailVerificationToken {
+  id      String   @id @default(cuid())
+  token   String   @unique
+  user    User     @relation(fields: [userId], references: [id])
+  userId  String
+  expires DateTime
+
+  createdAt DateTime @default(now())
+}
+
+model Operator {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String
+  isActive     Boolean  @default(true)
+
+  roles OperatorRole[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+
+  operators   OperatorRole[]
+  permissions RolePermission[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  description String?
+
+  roles RolePermission[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model OperatorRole {
+  operator   Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  operatorId String
+
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  roleId String
+
+  assignedAt DateTime @default(now())
+
+  @@id([operatorId, roleId])
+}
+
+model RolePermission {
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  roleId       String
+
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  permissionId String
+
+  assignedAt DateTime @default(now())
+
+  @@id([roleId, permissionId])
+}

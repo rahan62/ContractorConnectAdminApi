@@ -1,0 +1,735 @@
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import bcrypt from "bcryptjs";
+import { ComplaintStatus, ContractStatus } from "@prisma/client";
+import { prisma } from "./prisma";
+import { verifyOperatorCredentials, isGranted } from "./auth";
+import { verifyTurnstile } from "./turnstile";
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+type MonetizationConfig = {
+  monthlySubscriptionPrice: number;
+  yearlySubscriptionPrice: number;
+  featuredListingPrice: number;
+  tokenUnitPrice: number;
+  vatRate: number;
+};
+
+let monetizationConfig: MonetizationConfig = {
+  monthlySubscriptionPrice: Number(process.env.ADMIN_MONTHLY_SUBSCRIPTION_PRICE || 1999),
+  yearlySubscriptionPrice: Number(process.env.ADMIN_YEARLY_SUBSCRIPTION_PRICE || 19999),
+  featuredListingPrice: Number(process.env.ADMIN_FEATURED_LISTING_PRICE || 499),
+  tokenUnitPrice: Number(process.env.ADMIN_TOKEN_UNIT_PRICE || 10),
+  vatRate: Number(process.env.ADMIN_VAT_RATE || 20)
+};
+
+const CONTRACT_STATUSES = Object.values(ContractStatus);
+const COMPLAINT_STATUSES = Object.values(ComplaintStatus);
+
+function parseOptionalDate(value: unknown) {
+  if (value === null) return null;
+  if (typeof value !== "string" || !value) return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function parseOptionalInt(value: unknown) {
+  if (value === null) return null;
+  if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isNaN(parsed) ? undefined : parsed;
+  }
+  return undefined;
+}
+
+function parseOptionalBoolean(value: unknown) {
+  if (typeof value === "boolean") return value;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return undefined;
+}
+
+function parseContractStatus(value: unknown): ContractStatus | undefined {
+  return typeof value === "string" && CONTRACT_STATUSES.includes(value as ContractStatus)
+    ? (value as ContractStatus)
+    : undefined;
+}
+
+function parseComplaintStatus(value: unknown): ComplaintStatus | undefined {
+  return typeof value === "string" && COMPLAINT_STATUSES.includes(value as ComplaintStatus)
+    ? (value as ComplaintStatus)
+    : undefined;
+}
+
+function requirePermission(code: string) {
+  return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const operatorId = String(req.header("x-operator-id") || "");
+    if (!operatorId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const allowed = await isGranted(operatorId, code);
+    if (!allowed) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
+    (req as any).operatorId = operatorId;
+    next();
+  };
+}
+
+app.get("/api/admin/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
+app.post("/api/admin/auth/login", async (req, res) => {
+  const { email, password, turnstileToken } = req.body as {
+    email: string;
+    password: string;
+    turnstileToken?: string;
+  };
+
+  const ok = await verifyTurnstile(turnstileToken);
+  if (!ok) {
+    return res.status(400).json({ message: "Turnstile verification failed" });
+  }
+
+  const operator = await verifyOperatorCredentials(email, password);
+  if (!operator) {
+    return res.status(401).json({ message: "Invalid credentials" });
+  }
+
+  res.json({ operatorId: operator.id, name: operator.name, email: operator.email });
+});
+
+app.get("/api/admin/dashboard", requirePermission("admin.view_dashboard"), async (_req, res) => {
+  const [users, pendingRegistrations, openComplaints, contracts, revenue] = await Promise.all([
+    prisma.user.count(),
+    prisma.user.count({
+      where: {
+        isVerified: false,
+        userType: { in: ["CONTRACTOR", "SUBCONTRACTOR", "TEAM"] }
+      }
+    }),
+    prisma.complaint.count({
+      where: {
+        status: { in: ["OPEN", "IN_PROGRESS"] }
+      }
+    }),
+    prisma.contract.count(),
+    prisma.payment.aggregate({
+      where: { status: "COMPLETED" },
+      _sum: { amount: true }
+    })
+  ]);
+
+  res.json({
+    users,
+    pendingRegistrations,
+    openComplaints,
+    contracts,
+    revenue: revenue._sum.amount ?? 0
+  });
+});
+
+app.get("/api/admin/users", requirePermission("users.view"), async (req, res) => {
+  const { userType, isVerified } = req.query;
+  const where: any = {};
+
+  if (userType) {
+    const types = Array.isArray(userType) ? userType : String(userType).split(",");
+    where.userType = { in: types };
+  }
+
+  if (typeof isVerified !== "undefined") {
+    where.isVerified = String(isVerified) === "true";
+  }
+
+  const [items, total] = await Promise.all([
+    prisma.user.findMany({
+      where,
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        phone: true,
+        userType: true,
+        companyName: true,
+        companyTaxOffice: true,
+        companyTaxNumber: true,
+        authorizedPersonName: true,
+        authorizedPersonPhone: true,
+        signatureAuthDocUrl: true,
+        taxCertificateDocUrl: true,
+        tradeRegistryGazetteDocUrl: true,
+        isVerified: true,
+        createdAt: true
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100
+    }),
+    prisma.user.count({ where })
+  ]);
+
+  res.json({ items, total });
+});
+
+app.get("/api/admin/users/:id", async (req, res) => {
+  const operatorId = String(req.header("x-operator-id") || "");
+  const canViewUser = await isGranted(operatorId, "users.view");
+  const canViewDocs = await isGranted(operatorId, "users.view_documents");
+  if (!canViewUser && !canViewDocs) {
+    return res.status(403).json({ message: "Forbidden" });
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: req.params.id },
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      phone: true,
+      userType: true,
+      companyName: true,
+      bio: true,
+      companyTaxOffice: true,
+      companyTaxNumber: true,
+      authorizedPersonName: true,
+      authorizedPersonPhone: true,
+      signatureAuthDocUrl: true,
+      taxCertificateDocUrl: true,
+      tradeRegistryGazetteDocUrl: true,
+      logoUrl: true,
+      bannerUrl: true,
+      isVerified: true,
+      createdAt: true
+    }
+  });
+
+  if (!user) {
+    return res.status(404).json({ message: "User not found" });
+  }
+
+  res.json(user);
+});
+
+app.get("/api/admin/registrations", requirePermission("manual_registrations.view"), async (_req, res) => {
+  const items = await prisma.user.findMany({
+    where: {
+      isVerified: false,
+      userType: { in: ["CONTRACTOR", "SUBCONTRACTOR", "TEAM"] }
+    },
+    select: {
+      id: true,
+      email: true,
+      userType: true,
+      companyName: true,
+      companyTaxOffice: true,
+      companyTaxNumber: true,
+      authorizedPersonName: true,
+      authorizedPersonPhone: true,
+      signatureAuthDocUrl: true,
+      taxCertificateDocUrl: true,
+      tradeRegistryGazetteDocUrl: true,
+      isVerified: true,
+      createdAt: true
+    },
+    orderBy: { createdAt: "desc" },
+    take: 100
+  });
+
+  res.json({ items });
+});
+
+app.patch("/api/admin/users/:id/verify", requirePermission("manual_registrations.approve"), async (req, res) => {
+  const user = await prisma.user.update({
+    where: { id: req.params.id },
+    data: { isVerified: true }
+  });
+
+  res.json(user);
+});
+
+app.get("/api/admin/contracts", requirePermission("contracts.view"), async (req, res) => {
+  const status = parseContractStatus(req.query.status);
+  const where = status ? { status } : undefined;
+
+  const items = await prisma.contract.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    take: 100,
+    select: {
+      id: true,
+      title: true,
+      description: true,
+      status: true,
+      budget: true,
+      currency: true,
+      startsAt: true,
+      totalDays: true,
+      createdAt: true,
+      contractor: {
+        select: { id: true, companyName: true, email: true }
+      },
+      client: {
+        select: { id: true, companyName: true, email: true }
+      },
+      _count: {
+        select: { bids: true, comments: true, complaints: true }
+      }
+    }
+  });
+
+  res.json({ items });
+});
+
+app.patch("/api/admin/contracts/:id", requirePermission("contracts.edit"), async (req, res) => {
+  const { title, description, status, budget, currency, startsAt, totalDays, endsAt, clientId, contractorId } =
+    req.body as Record<string, unknown>;
+
+  const updated = await prisma.contract.update({
+    where: { id: req.params.id },
+    data: {
+      title: typeof title === "string" ? title : undefined,
+      description: typeof description === "string" ? description : undefined,
+      status: parseContractStatus(status),
+      budget: parseOptionalInt(budget),
+      currency: typeof currency === "string" ? currency : undefined,
+      startsAt: parseOptionalDate(startsAt),
+      totalDays: parseOptionalInt(totalDays),
+      endsAt: parseOptionalDate(endsAt),
+      clientId: typeof clientId === "string" ? clientId : clientId === null ? null : undefined,
+      contractorId:
+        typeof contractorId === "string" ? contractorId : contractorId === null ? null : undefined
+    }
+  });
+
+  res.json(updated);
+});
+
+app.get("/api/admin/complaints", requirePermission("complaints.view"), async (req, res) => {
+  const status = parseComplaintStatus(req.query.status);
+  const where = status ? { status } : undefined;
+
+  const items = await prisma.complaint.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    take: 100,
+    select: {
+      id: true,
+      title: true,
+      description: true,
+      status: true,
+      createdAt: true,
+      user: {
+        select: { id: true, companyName: true, email: true }
+      },
+      contract: {
+        select: { id: true, title: true, status: true }
+      }
+    }
+  });
+
+  res.json({ items });
+});
+
+app.patch("/api/admin/complaints/:id", requirePermission("complaints.edit_status"), async (req, res) => {
+  const { status } = req.body as { status?: string };
+
+  const updated = await prisma.complaint.update({
+    where: { id: req.params.id },
+    data: {
+      status: parseComplaintStatus(status)
+    }
+  });
+
+  res.json(updated);
+});
+
+app.get("/api/admin/payments", requirePermission("payments.view"), async (_req, res) => {
+  const [items, totals] = await Promise.all([
+    prisma.payment.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 100,
+      select: {
+        id: true,
+        amount: true,
+        currency: true,
+        status: true,
+        createdAt: true,
+        user: {
+          select: { id: true, companyName: true, email: true }
+        },
+        contract: {
+          select: { id: true, title: true }
+        }
+      }
+    }),
+    prisma.payment.groupBy({
+      by: ["status"],
+      _sum: { amount: true }
+    })
+  ]);
+
+  res.json({ items, totals });
+});
+
+app.patch("/api/admin/payments/:id/refund", requirePermission("payments.refund"), async (req, res) => {
+  const payment = await prisma.payment.update({
+    where: { id: req.params.id },
+    data: { status: "REFUNDED" }
+  });
+
+  res.json(payment);
+});
+
+app.get("/api/admin/teams", requirePermission("teams.view"), async (_req, res) => {
+  const items = await prisma.team.findMany({
+    orderBy: { createdAt: "desc" },
+    take: 100,
+    select: {
+      id: true,
+      name: true,
+      createdAt: true,
+      leader: {
+        select: { id: true, name: true, email: true, companyName: true }
+      },
+      _count: {
+        select: { members: true }
+      }
+    }
+  });
+
+  res.json({ items });
+});
+
+app.patch("/api/admin/teams/:id", requirePermission("teams.edit"), async (req, res) => {
+  const { name, leaderId } = req.body as { name?: string; leaderId?: string };
+
+  const updated = await prisma.team.update({
+    where: { id: req.params.id },
+    data: {
+      name: typeof name === "string" ? name : undefined,
+      leaderId: typeof leaderId === "string" ? leaderId : undefined
+    }
+  });
+
+  res.json(updated);
+});
+
+app.get("/api/admin/operators", requirePermission("operators.view"), async (_req, res) => {
+  const items = await prisma.operator.findMany({
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      isActive: true,
+      createdAt: true,
+      roles: {
+        include: {
+          role: {
+            select: {
+              id: true,
+              name: true
+            }
+          }
+        }
+      }
+    }
+  });
+
+  res.json({
+    items: items.map(item => ({
+      ...item,
+      roles: item.roles.map(roleLink => roleLink.role)
+    }))
+  });
+});
+
+app.post("/api/admin/operators", requirePermission("operators.create"), async (req, res) => {
+  const { email, name, password, isActive, roleIds } = req.body as {
+    email?: string;
+    name?: string;
+    password?: string;
+    isActive?: boolean;
+    roleIds?: string[];
+  };
+
+  if (!email || !password) {
+    return res.status(400).json({ message: "Email and password are required" });
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const operator = await prisma.operator.create({
+    data: {
+      email,
+      name,
+      passwordHash,
+      isActive: isActive ?? true,
+      roles: roleIds?.length
+        ? {
+            create: roleIds.map(roleId => ({
+              roleId
+            }))
+          }
+        : undefined
+    }
+  });
+
+  res.status(201).json(operator);
+});
+
+app.patch("/api/admin/operators/:id", requirePermission("operators.edit"), async (req, res) => {
+  const { email, name, password, isActive } = req.body as {
+    email?: string;
+    name?: string;
+    password?: string;
+    isActive?: boolean;
+  };
+
+  const updated = await prisma.operator.update({
+    where: { id: req.params.id },
+    data: {
+      email: typeof email === "string" ? email : undefined,
+      name: typeof name === "string" ? name : undefined,
+      isActive: parseOptionalBoolean(isActive),
+      passwordHash: password ? await bcrypt.hash(password, 10) : undefined
+    }
+  });
+
+  res.json(updated);
+});
+
+app.patch("/api/admin/operators/:id/roles", requirePermission("operators.assign_roles"), async (req, res) => {
+  const { roleIds } = req.body as { roleIds?: string[] };
+  const ids = Array.isArray(roleIds) ? roleIds : [];
+
+  await prisma.$transaction([
+    prisma.operatorRole.deleteMany({ where: { operatorId: req.params.id } }),
+    ...(ids.length
+      ? [
+          prisma.operatorRole.createMany({
+            data: ids.map(roleId => ({
+              operatorId: req.params.id,
+              roleId
+            }))
+          })
+        ]
+      : [])
+  ]);
+
+  const operator = await prisma.operator.findUnique({
+    where: { id: req.params.id },
+    include: {
+      roles: {
+        include: {
+          role: true
+        }
+      }
+    }
+  });
+
+  res.json(operator);
+});
+
+app.get("/api/admin/roles", requirePermission("roles.view"), async (_req, res) => {
+  const items = await prisma.role.findMany({
+    orderBy: { createdAt: "desc" },
+    include: {
+      permissions: {
+        include: {
+          permission: true
+        }
+      },
+      _count: {
+        select: {
+          operators: true
+        }
+      }
+    }
+  });
+
+  res.json({
+    items: items.map(item => ({
+      ...item,
+      permissions: item.permissions.map(permissionLink => permissionLink.permission)
+    }))
+  });
+});
+
+app.post("/api/admin/roles", requirePermission("roles.create"), async (req, res) => {
+  const { name, description } = req.body as { name?: string; description?: string };
+
+  if (!name) {
+    return res.status(400).json({ message: "Role name is required" });
+  }
+
+  const role = await prisma.role.create({
+    data: {
+      name,
+      description
+    }
+  });
+
+  res.status(201).json(role);
+});
+
+app.patch("/api/admin/roles/:id", requirePermission("roles.edit"), async (req, res) => {
+  const { name, description } = req.body as { name?: string; description?: string };
+
+  const role = await prisma.role.update({
+    where: { id: req.params.id },
+    data: {
+      name: typeof name === "string" ? name : undefined,
+      description: typeof description === "string" ? description : undefined
+    }
+  });
+
+  res.json(role);
+});
+
+app.delete("/api/admin/roles/:id", requirePermission("roles.delete"), async (req, res) => {
+  await prisma.role.delete({
+    where: { id: req.params.id }
+  });
+
+  res.json({ ok: true });
+});
+
+app.get("/api/admin/permissions", requirePermission("permissions.view"), async (_req, res) => {
+  const items = await prisma.permission.findMany({
+    orderBy: { code: "asc" }
+  });
+
+  res.json({ items });
+});
+
+app.post("/api/admin/permissions", requirePermission("permissions.create"), async (req, res) => {
+  const { code, description } = req.body as { code?: string; description?: string };
+
+  if (!code) {
+    return res.status(400).json({ message: "Permission code is required" });
+  }
+
+  const permission = await prisma.permission.create({
+    data: {
+      code,
+      description
+    }
+  });
+
+  res.status(201).json(permission);
+});
+
+app.patch("/api/admin/permissions/:id", requirePermission("permissions.edit"), async (req, res) => {
+  const { code, description } = req.body as { code?: string; description?: string };
+
+  const permission = await prisma.permission.update({
+    where: { id: req.params.id },
+    data: {
+      code: typeof code === "string" ? code : undefined,
+      description: typeof description === "string" ? description : undefined
+    }
+  });
+
+  res.json(permission);
+});
+
+app.delete("/api/admin/permissions/:id", requirePermission("permissions.delete"), async (req, res) => {
+  await prisma.permission.delete({
+    where: { id: req.params.id }
+  });
+
+  res.json({ ok: true });
+});
+
+app.patch("/api/admin/roles/:id/permissions", requirePermission("roles.assign_permissions"), async (req, res) => {
+  const { permissionIds } = req.body as { permissionIds?: string[] };
+  const ids = Array.isArray(permissionIds) ? permissionIds : [];
+
+  await prisma.$transaction([
+    prisma.rolePermission.deleteMany({ where: { roleId: req.params.id } }),
+    ...(ids.length
+      ? [
+          prisma.rolePermission.createMany({
+            data: ids.map(permissionId => ({
+              roleId: req.params.id,
+              permissionId
+            }))
+          })
+        ]
+      : [])
+  ]);
+
+  const role = await prisma.role.findUnique({
+    where: { id: req.params.id },
+    include: {
+      permissions: {
+        include: {
+          permission: true
+        }
+      }
+    }
+  });
+
+  res.json(role);
+});
+
+app.get("/api/admin/monetization", requirePermission("monetization.view"), async (_req, res) => {
+  const [completedPayments, refundedPayments, users, activeContracts] = await Promise.all([
+    prisma.payment.aggregate({
+      where: { status: "COMPLETED" },
+      _sum: { amount: true },
+      _count: { id: true }
+    }),
+    prisma.payment.aggregate({
+      where: { status: "REFUNDED" },
+      _sum: { amount: true },
+      _count: { id: true }
+    }),
+    prisma.user.count(),
+    prisma.contract.count({
+      where: {
+        status: { in: ["OPEN_FOR_BIDS", "ACTIVE"] }
+      }
+    })
+  ]);
+
+  res.json({
+    config: monetizationConfig,
+    stats: {
+      completedRevenue: completedPayments._sum.amount ?? 0,
+      completedPayments: completedPayments._count.id,
+      refundedRevenue: refundedPayments._sum.amount ?? 0,
+      refundedPayments: refundedPayments._count.id,
+      totalUsers: users,
+      activeContracts
+    }
+  });
+});
+
+app.patch("/api/admin/monetization", requirePermission("monetization.edit"), async (req, res) => {
+  monetizationConfig = {
+    monthlySubscriptionPrice:
+      parseOptionalInt(req.body.monthlySubscriptionPrice) ?? monetizationConfig.monthlySubscriptionPrice,
+    yearlySubscriptionPrice:
+      parseOptionalInt(req.body.yearlySubscriptionPrice) ?? monetizationConfig.yearlySubscriptionPrice,
+    featuredListingPrice:
+      parseOptionalInt(req.body.featuredListingPrice) ?? monetizationConfig.featuredListingPrice,
+    tokenUnitPrice: parseOptionalInt(req.body.tokenUnitPrice) ?? monetizationConfig.tokenUnitPrice,
+    vatRate: parseOptionalInt(req.body.vatRate) ?? monetizationConfig.vatRate
+  };
+
+  res.json({ config: monetizationConfig });
+});
+
+const port = process.env.PORT || 4000;
+app.listen(port, () => {
+  console.log(`Admin API listening on port ${port}`);
+});
