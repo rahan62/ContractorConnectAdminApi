@@ -4,11 +4,19 @@ import cors from "cors";
 import bcrypt from "bcryptjs";
 import { ComplaintStatus, ContractStatus } from "@prisma/client";
 import { prisma } from "./prisma";
-import { verifyOperatorCredentials, isGranted } from "./auth";
+import { verifyAdminToken, verifyOperatorCredentials, isGranted, signAdminToken } from "./auth";
 import { verifyTurnstile } from "./turnstile";
 
 const app = express();
-app.use(cors());
+app.use(
+  cors({
+    origin: [
+      "http://localhost:3000",
+      "http://localhost:3001",
+      "https://admin.taseron.org"
+    ]
+  })
+);
 app.use(express.json());
 
 type MonetizationConfig = {
@@ -68,7 +76,7 @@ function parseComplaintStatus(value: unknown): ComplaintStatus | undefined {
 
 function requirePermission(code: string) {
   return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const operatorId = String(req.header("x-operator-id") || "");
+    const operatorId = getAuthenticatedOperatorId(req);
     if (!operatorId) {
       return res.status(401).json({ message: "Unauthorized" });
     }
@@ -81,6 +89,21 @@ function requirePermission(code: string) {
     (req as any).operatorId = operatorId;
     next();
   };
+}
+
+function getAuthenticatedOperatorId(req: express.Request) {
+  const authHeader = req.header("authorization") || "";
+  if (!authHeader.startsWith("Bearer ")) {
+    return null;
+  }
+
+  const token = authHeader.slice("Bearer ".length).trim();
+  if (!token) {
+    return null;
+  }
+
+  const payload = verifyAdminToken(token);
+  return payload?.operatorId ?? null;
 }
 
 app.get("/api/admin/health", (_req, res) => {
@@ -104,7 +127,12 @@ app.post("/api/admin/auth/login", async (req, res) => {
     return res.status(401).json({ message: "Invalid credentials" });
   }
 
-  res.json({ operatorId: operator.id, name: operator.name, email: operator.email });
+  res.json({
+    operatorId: operator.id,
+    name: operator.name,
+    email: operator.email,
+    accessToken: signAdminToken(operator.id)
+  });
 });
 
 app.get("/api/admin/dashboard", requirePermission("admin.view_dashboard"), async (_req, res) => {
@@ -180,7 +208,10 @@ app.get("/api/admin/users", requirePermission("users.view"), async (req, res) =>
 });
 
 app.get("/api/admin/users/:id", async (req, res) => {
-  const operatorId = String(req.header("x-operator-id") || "");
+  const operatorId = getAuthenticatedOperatorId(req);
+  if (!operatorId) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
   const canViewUser = await isGranted(operatorId, "users.view");
   const canViewDocs = await isGranted(operatorId, "users.view_documents");
   if (!canViewUser && !canViewDocs) {

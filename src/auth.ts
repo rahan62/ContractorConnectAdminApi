@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 import { prisma } from "./prisma";
 
 export async function verifyOperatorCredentials(email: string, password: string) {
@@ -11,6 +12,32 @@ export async function verifyOperatorCredentials(email: string, password: string)
   if (!ok) return null;
 
   return operator;
+}
+
+function getAdminJwtSecret() {
+  const secret = process.env.ADMIN_JWT_SECRET;
+  if (!secret) {
+    throw new Error("ADMIN_JWT_SECRET is not configured");
+  }
+  return secret;
+}
+
+export function signAdminToken(operatorId: string) {
+  return jwt.sign({ operatorId }, getAdminJwtSecret(), {
+    expiresIn: "12h"
+  });
+}
+
+export function verifyAdminToken(token: string): { operatorId: string } | null {
+  try {
+    const payload = jwt.verify(token, getAdminJwtSecret()) as { operatorId?: string };
+    if (!payload.operatorId) {
+      return null;
+    }
+    return { operatorId: payload.operatorId };
+  } catch {
+    return null;
+  }
 }
 
 export async function isGranted(operatorId: string, permissionCode: string) {
