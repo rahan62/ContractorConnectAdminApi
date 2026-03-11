@@ -21,11 +21,6 @@ export async function verifyTurnstile(token: string | null | undefined): Promise
 
   const data = (await res.json()) as { success: boolean };
 
-  if (!data.success && process.env.NODE_ENV !== "production") {
-    console.warn("[admin turnstile] verification failed in dev, allowing request");
-    return true;
-  }
-
   return data.success;
 }
 
