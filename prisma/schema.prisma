@@ -153,6 +153,7 @@ model Bid {
   id       String    @id @default(cuid())
   amount   Int
   currency String?
+  documentUrl String?
   status   BidStatus @default(PENDING)
 
   contract   Contract @relation(fields: [contractId], references: [id])
