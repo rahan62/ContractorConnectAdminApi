@@ -25,6 +25,11 @@ type MonetizationConfig = {
   featuredListingPrice: number;
   tokenUnitPrice: number;
   vatRate: number;
+  // Token costs per action (configurable from admin UI)
+  tokensPerContract: number;
+  tokensPerBid: number;
+  tokensPerAvailabilityPost: number;
+  tokensPerUrgentJob: number;
 };
 
 let monetizationConfig: MonetizationConfig = {
@@ -32,7 +37,11 @@ let monetizationConfig: MonetizationConfig = {
   yearlySubscriptionPrice: Number(process.env.ADMIN_YEARLY_SUBSCRIPTION_PRICE || 19999),
   featuredListingPrice: Number(process.env.ADMIN_FEATURED_LISTING_PRICE || 499),
   tokenUnitPrice: Number(process.env.ADMIN_TOKEN_UNIT_PRICE || 10),
-  vatRate: Number(process.env.ADMIN_VAT_RATE || 20)
+  vatRate: Number(process.env.ADMIN_VAT_RATE || 20),
+  tokensPerContract: Number(process.env.ADMIN_TOKENS_PER_CONTRACT || 5),
+  tokensPerBid: Number(process.env.ADMIN_TOKENS_PER_BID || 1),
+  tokensPerAvailabilityPost: Number(process.env.ADMIN_TOKENS_PER_AVAILABILITY_POST || 1),
+  tokensPerUrgentJob: Number(process.env.ADMIN_TOKENS_PER_URGENT_JOB || 3)
 };
 
 const CONTRACT_STATUSES = Object.values(ContractStatus);
@@ -237,6 +246,7 @@ app.get("/api/admin/users/:id", async (req, res) => {
       tradeRegistryGazetteDocUrl: true,
       logoUrl: true,
       bannerUrl: true,
+      tokenBalance: true,
       isVerified: true,
       createdAt: true
     }
@@ -245,6 +255,28 @@ app.get("/api/admin/users/:id", async (req, res) => {
   if (!user) {
     return res.status(404).json({ message: "User not found" });
   }
+
+  res.json(user);
+});
+
+app.post("/api/admin/users/:id/add-tokens", requirePermission("users.edit"), async (req, res) => {
+  const amount = parseOptionalInt(req.body.amount);
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ message: "Amount must be a positive integer" });
+  }
+
+  const user = await prisma.user.update({
+    where: { id: req.params.id },
+    data: {
+      tokenBalance: {
+        increment: amount
+      }
+    },
+    select: {
+      id: true,
+      tokenBalance: true
+    }
+  });
 
   res.json(user);
 });
@@ -713,7 +745,7 @@ app.patch("/api/admin/roles/:id/permissions", requirePermission("roles.assign_pe
 });
 
 app.get("/api/admin/monetization", requirePermission("monetization.view"), async (_req, res) => {
-  const [completedPayments, refundedPayments, users, activeContracts] = await Promise.all([
+  const [completedPayments, refundedPayments, users, activeContracts, dbConfig] = await Promise.all([
     prisma.payment.aggregate({
       where: { status: "COMPLETED" },
       _sum: { amount: true },
@@ -729,8 +761,24 @@ app.get("/api/admin/monetization", requirePermission("monetization.view"), async
       where: {
         status: { in: ["OPEN_FOR_BIDS", "ACTIVE"] }
       }
-    })
+    }),
+    prisma.monetizationConfig.findFirst()
   ]);
+
+  if (dbConfig) {
+    monetizationConfig = {
+      ...monetizationConfig,
+      monthlySubscriptionPrice: dbConfig.monthlySubscriptionPrice,
+      yearlySubscriptionPrice: dbConfig.yearlySubscriptionPrice,
+      featuredListingPrice: dbConfig.featuredListingPrice,
+      tokenUnitPrice: dbConfig.tokenUnitPrice,
+      vatRate: dbConfig.vatRate,
+      tokensPerContract: dbConfig.tokensPerContract,
+      tokensPerBid: dbConfig.tokensPerBid,
+      tokensPerAvailabilityPost: dbConfig.tokensPerAvailabilityPost,
+      tokensPerUrgentJob: dbConfig.tokensPerUrgentJob
+    };
+  }
 
   res.json({
     config: monetizationConfig,
@@ -754,8 +802,42 @@ app.patch("/api/admin/monetization", requirePermission("monetization.edit"), asy
     featuredListingPrice:
       parseOptionalInt(req.body.featuredListingPrice) ?? monetizationConfig.featuredListingPrice,
     tokenUnitPrice: parseOptionalInt(req.body.tokenUnitPrice) ?? monetizationConfig.tokenUnitPrice,
-    vatRate: parseOptionalInt(req.body.vatRate) ?? monetizationConfig.vatRate
+    vatRate: parseOptionalInt(req.body.vatRate) ?? monetizationConfig.vatRate,
+    tokensPerContract:
+      parseOptionalInt(req.body.tokensPerContract) ?? monetizationConfig.tokensPerContract,
+    tokensPerBid: parseOptionalInt(req.body.tokensPerBid) ?? monetizationConfig.tokensPerBid,
+    tokensPerAvailabilityPost:
+      parseOptionalInt(req.body.tokensPerAvailabilityPost) ?? monetizationConfig.tokensPerAvailabilityPost,
+    tokensPerUrgentJob:
+      parseOptionalInt(req.body.tokensPerUrgentJob) ?? monetizationConfig.tokensPerUrgentJob
   };
+
+  await prisma.monetizationConfig.upsert({
+    where: { id: 1 },
+    update: {
+      monthlySubscriptionPrice: monetizationConfig.monthlySubscriptionPrice,
+      yearlySubscriptionPrice: monetizationConfig.yearlySubscriptionPrice,
+      featuredListingPrice: monetizationConfig.featuredListingPrice,
+      tokenUnitPrice: monetizationConfig.tokenUnitPrice,
+      vatRate: monetizationConfig.vatRate,
+      tokensPerContract: monetizationConfig.tokensPerContract,
+      tokensPerBid: monetizationConfig.tokensPerBid,
+      tokensPerAvailabilityPost: monetizationConfig.tokensPerAvailabilityPost,
+      tokensPerUrgentJob: monetizationConfig.tokensPerUrgentJob
+    },
+    create: {
+      id: 1,
+      monthlySubscriptionPrice: monetizationConfig.monthlySubscriptionPrice,
+      yearlySubscriptionPrice: monetizationConfig.yearlySubscriptionPrice,
+      featuredListingPrice: monetizationConfig.featuredListingPrice,
+      tokenUnitPrice: monetizationConfig.tokenUnitPrice,
+      vatRate: monetizationConfig.vatRate,
+      tokensPerContract: monetizationConfig.tokensPerContract,
+      tokensPerBid: monetizationConfig.tokensPerBid,
+      tokensPerAvailabilityPost: monetizationConfig.tokensPerAvailabilityPost,
+      tokensPerUrgentJob: monetizationConfig.tokensPerUrgentJob
+    }
+  });
 
   res.json({ config: monetizationConfig });
 });
