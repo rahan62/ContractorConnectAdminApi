@@ -8,16 +8,30 @@ import { verifyAdminToken, verifyOperatorCredentials, isGranted, signAdminToken 
 import { verifyTurnstile } from "./turnstile";
 
 const app = express();
+
+const defaultCorsOrigins = [
+  "http://localhost:3000",
+  "http://localhost:3001",
+  "https://admin.yuklenicim.com",
+  "https://admin.taseron.org"
+];
+const corsOrigins = process.env.ADMIN_CORS_ORIGINS?.split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
 app.use(
   cors({
-    origin: [
-      "http://localhost:3000",
-      "http://localhost:3001",
-      "https://admin.taseron.org"
-    ]
+    origin: corsOrigins && corsOrigins.length > 0 ? corsOrigins : defaultCorsOrigins
   })
 );
 app.use(express.json());
+
+app.get("/", (_req, res) => {
+  res.json({
+    service: "yuklenicim-admin-api",
+    message: "No resource at /. Use GET /api/admin/health for a health check.",
+    health: "/api/admin/health"
+  });
+});
 
 type MonetizationConfig = {
   monthlySubscriptionPrice: number;
