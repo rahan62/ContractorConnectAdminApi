@@ -108,8 +108,62 @@ model User {
   referencesToCheck CompanyReference[]         @relation("ReferenceVerifier")
   capabilities      UserCapability[]
 
+  subcontractorMainCategories          UserSubcontractorMainCategory[]
+  categoryExperienceApprovalRequests   CategoryExperienceApprovalRequest[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+enum ProfessionRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model SubcontractorMainCategory {
+  id        String @id @default(cuid())
+  slug      String @unique
+  nameEn    String
+  nameTr    String
+  sortOrder Int    @default(0)
+
+  userLinks    UserSubcontractorMainCategory[]
+  categoryExperienceApprovalRequests CategoryExperienceApprovalRequest[]
+}
+
+model UserSubcontractorMainCategory {
+  userId         String
+  mainCategoryId String
+
+  user         User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mainCategory SubcontractorMainCategory @relation(fields: [mainCategoryId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([userId, mainCategoryId])
+}
+
+model CategoryExperienceApprovalRequest {
+  id                   String                  @id @default(cuid())
+  userId               String
+  mainCategoryId       String
+  documentUrls         String
+  applicantNote        String?
+  status               ProfessionRequestStatus @default(PENDING)
+  reviewerNote         String?
+  reviewedAt           DateTime?
+  reviewedByOperatorId String?
+
+  user         User                        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mainCategory SubcontractorMainCategory   @relation(fields: [mainCategoryId], references: [id], onDelete: Cascade)
+  reviewedByOperator Operator?             @relation(fields: [reviewedByOperatorId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([userId, mainCategoryId])
 }
 
 model Penalty {
@@ -398,6 +452,7 @@ model Operator {
   isActive     Boolean  @default(true)
 
   roles OperatorRole[]
+  reviewedCategoryExperienceRequests CategoryExperienceApprovalRequest[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

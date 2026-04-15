@@ -1,6 +1,21 @@
-import "dotenv/config";
+import path from "node:path";
+import { config as loadEnv } from "dotenv";
 import bcrypt from "bcryptjs";
 import { PrismaClient } from "@prisma/client";
+
+// Load Admin API .env first; if missing DATABASE_URL, reuse main app .env (same DB in dev).
+const adminApiRoot = path.resolve(__dirname, "..");
+loadEnv({ path: path.join(adminApiRoot, ".env") });
+if (!process.env.DATABASE_URL?.trim()) {
+  loadEnv({ path: path.join(adminApiRoot, "..", "ContractorConnect", ".env") });
+}
+if (!process.env.DATABASE_URL?.trim()) {
+  console.error(
+    "DATABASE_URL is not set. Create ContractorConnectAdminApi/.env (see .env.example) " +
+      "with DATABASE_URL, or add DATABASE_URL to ContractorConnect/.env."
+  );
+  process.exit(1);
+}
 
 const prisma = new PrismaClient();
 
@@ -40,18 +55,21 @@ async function main() {
     "teams.view",
     "teams.edit",
     "monetization.view",
-    "monetization.edit"
+    "monetization.edit",
+    "category_experience.view",
+    "category_experience.review"
   ];
 
-  const permissions = await Promise.all(
-    permissionCodes.map(code =>
-      prisma.permission.upsert({
+  const permissions = [];
+  for (const code of permissionCodes) {
+    permissions.push(
+      await prisma.permission.upsert({
         where: { code },
         update: {},
         create: { code }
       })
-    )
-  );
+    );
+  }
 
   // Create Super Admin role with all permissions
   const superAdminRole = await prisma.role.upsert({

@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import bcrypt from "bcryptjs";
-import { ComplaintStatus, ContractStatus } from "@prisma/client";
+import { ComplaintStatus, ContractStatus, ProfessionRequestStatus } from "@prisma/client";
 import { prisma } from "./prisma";
 import { verifyAdminToken, verifyOperatorCredentials, isGranted, signAdminToken } from "./auth";
 import { verifyTurnstile } from "./turnstile";
@@ -855,6 +855,122 @@ app.patch("/api/admin/monetization", requirePermission("monetization.edit"), asy
 
   res.json({ config: monetizationConfig });
 });
+
+const CATEGORY_EXPERIENCE_STATUSES = Object.values(ProfessionRequestStatus);
+
+app.get("/api/admin/category-experience-requests", requirePermission("category_experience.view"), async (req, res) => {
+  const statusParam = typeof req.query.status === "string" ? req.query.status.trim() : "";
+  const status =
+    statusParam && CATEGORY_EXPERIENCE_STATUSES.includes(statusParam as ProfessionRequestStatus)
+      ? (statusParam as ProfessionRequestStatus)
+      : undefined;
+
+  const items = await prisma.categoryExperienceApprovalRequest.findMany({
+    where: status ? { status } : undefined,
+    orderBy: { createdAt: "desc" },
+    include: {
+      user: {
+        select: { id: true, email: true, companyName: true, userType: true }
+      },
+      mainCategory: {
+        select: { id: true, slug: true, nameEn: true, nameTr: true }
+      },
+      reviewedByOperator: {
+        select: { id: true, name: true, email: true }
+      }
+    }
+  });
+
+  res.json({ items });
+});
+
+app.patch(
+  "/api/admin/category-experience-requests/:id",
+  requirePermission("category_experience.review"),
+  async (req, res) => {
+    const id = req.params.id;
+    const body = req.body as { status?: string; reviewerNote?: string | null };
+    const nextStatus =
+      typeof body.status === "string" && CATEGORY_EXPERIENCE_STATUSES.includes(body.status as ProfessionRequestStatus)
+        ? (body.status as ProfessionRequestStatus)
+        : undefined;
+
+    if (nextStatus !== "APPROVED" && nextStatus !== "REJECTED") {
+      return res.status(400).json({ message: "status must be APPROVED or REJECTED" });
+    }
+
+    const reviewerNote =
+      typeof body.reviewerNote === "string" && body.reviewerNote.trim() ? body.reviewerNote.trim() : null;
+
+    const operatorId = (req as express.Request & { operatorId?: string }).operatorId;
+    if (!operatorId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const existing = await prisma.categoryExperienceApprovalRequest.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        userId: true,
+        mainCategoryId: true,
+        status: true
+      }
+    });
+
+    if (!existing) {
+      return res.status(404).json({ message: "Request not found" });
+    }
+    if (existing.status !== "PENDING") {
+      return res.status(400).json({ message: "Only pending requests can be reviewed" });
+    }
+
+    try {
+      const updated = await prisma.$transaction(async tx => {
+        if (nextStatus === "APPROVED") {
+          await tx.userSubcontractorMainCategory.upsert({
+            where: {
+              userId_mainCategoryId: {
+                userId: existing.userId,
+                mainCategoryId: existing.mainCategoryId
+              }
+            },
+            create: {
+              userId: existing.userId,
+              mainCategoryId: existing.mainCategoryId
+            },
+            update: {}
+          });
+        }
+
+        return tx.categoryExperienceApprovalRequest.update({
+          where: { id },
+          data: {
+            status: nextStatus,
+            reviewerNote,
+            reviewedAt: new Date(),
+            reviewedByOperatorId: operatorId
+          },
+          include: {
+            user: {
+              select: { id: true, email: true, companyName: true, userType: true }
+            },
+            mainCategory: {
+              select: { id: true, slug: true, nameEn: true, nameTr: true }
+            },
+            reviewedByOperator: {
+              select: { id: true, name: true, email: true }
+            }
+          }
+        });
+      });
+
+      return res.json(updated);
+    } catch (e) {
+      console.error("[category-experience-requests PATCH]", e);
+      return res.status(500).json({ message: "Failed to update request" });
+    }
+  }
+);
 
 const port = process.env.PORT || 4000;
 app.listen(port, () => {
