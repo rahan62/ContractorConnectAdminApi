@@ -224,6 +224,30 @@ model TeamMember {
   userId String
 }
 
+model City {
+  id        String @id @default(cuid())
+  plateCode Int    @unique
+  nameTr    String
+  sortOrder Int    @default(0)
+
+  districts District[]
+  contracts Contract[]
+}
+
+/// İlçeler — her ilçe tek bir ile bağlıdır (City 1 — N District).
+model District {
+  id        String @id @default(cuid())
+  cityId    String
+  city      City   @relation(fields: [cityId], references: [id], onDelete: Cascade)
+  nameTr    String
+  sortOrder Int    @default(0)
+
+  contracts Contract[]
+
+  @@unique([cityId, nameTr])
+  @@index([cityId])
+}
+
 model Contract {
   id          String         @id @default(cuid())
   title       String
@@ -238,6 +262,12 @@ model Contract {
 
   client   User?  @relation("UserContractsAsClient", fields: [clientId], references: [id])
   clientId String?
+
+  // Konum (il / ilçe) — shared DB with main app
+  cityId     String?
+  districtId String?
+  city       City?     @relation(fields: [cityId], references: [id], onDelete: SetNull)
+  district   District? @relation(fields: [districtId], references: [id], onDelete: SetNull)
 
   budget   Int?
   currency String?
