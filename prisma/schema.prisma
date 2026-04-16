@@ -91,6 +91,10 @@ model User {
 
   isVerified Boolean @default(false)
 
+  experienceScore Int @default(45)
+  strengthPoints Decimal @default(2) @db.Decimal(14, 4)
+  companyHasIso9001 Boolean @default(false)
+
   contractsCreated  Contract[]               @relation("UserContractsCreated")
   contractsAsClient Contract[]               @relation("UserContractsAsClient")
   bids              Bid[]
@@ -150,6 +154,7 @@ model CategoryExperienceApprovalRequest {
   mainCategoryId       String
   documentUrls         String
   applicantNote        String?
+  declaredEvidenceValueUsd Decimal? @db.Decimal(18, 2)
   status               ProfessionRequestStatus @default(PENDING)
   reviewerNote         String?
   reviewedAt           DateTime?
@@ -265,6 +270,21 @@ model MonetizationConfig {
   tokensPerBid             Int
   tokensPerAvailabilityPost Int
   tokensPerUrgentJob       Int
+}
+
+model TrustStrengthConfig {
+  id Int @id @default(1)
+
+  experienceDefault Int @default(45)
+  strengthPointsDefault Decimal @default(2) @db.Decimal(14, 4)
+
+  pointsPerTradeCategory Decimal @default(2) @db.Decimal(10, 4)
+  pointsIso9001          Decimal @default(1) @db.Decimal(10, 4)
+  usdPerStrengthPoint    Decimal @default(333333) @db.Decimal(18, 4)
+
+  strengthTiersJson Json?
+
+  updatedAt DateTime @updatedAt
 }
 
 model Bid {

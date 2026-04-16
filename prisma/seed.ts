@@ -57,7 +57,9 @@ async function main() {
     "monetization.view",
     "monetization.edit",
     "category_experience.view",
-    "category_experience.review"
+    "category_experience.review",
+    "trust_strength.view",
+    "trust_strength.edit"
   ];
 
   const permissions = [];

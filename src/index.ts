@@ -2,8 +2,9 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import bcrypt from "bcryptjs";
-import { ComplaintStatus, ContractStatus, ProfessionRequestStatus } from "@prisma/client";
+import { ComplaintStatus, ContractStatus, Prisma, ProfessionRequestStatus } from "@prisma/client";
 import { prisma } from "./prisma";
+import { recalculateStrengthPointsForUser } from "./trust-strength-recalc";
 import { verifyAdminToken, verifyOperatorCredentials, isGranted, signAdminToken } from "./auth";
 import { verifyTurnstile } from "./turnstile";
 
@@ -82,6 +83,16 @@ function parseOptionalBoolean(value: unknown) {
   if (typeof value === "boolean") return value;
   if (value === "true") return true;
   if (value === "false") return false;
+  return undefined;
+}
+
+function parseOptionalNumber(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === "") return undefined;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  }
   return undefined;
 }
 
@@ -856,6 +867,119 @@ app.patch("/api/admin/monetization", requirePermission("monetization.edit"), asy
   res.json({ config: monetizationConfig });
 });
 
+app.get("/api/admin/trust-strength", requirePermission("trust_strength.view"), async (_req, res) => {
+  const row =
+    (await prisma.trustStrengthConfig.findUnique({ where: { id: 1 } })) ??
+    (await prisma.trustStrengthConfig.create({
+      data: {
+        id: 1,
+        experienceDefault: 45,
+        strengthPointsDefault: new Prisma.Decimal(2),
+        pointsPerTradeCategory: new Prisma.Decimal(2),
+        pointsIso9001: new Prisma.Decimal(1),
+        usdPerStrengthPoint: new Prisma.Decimal(333333)
+      }
+    }));
+
+  res.json({
+    config: {
+      experienceDefault: row.experienceDefault,
+      strengthPointsDefault: Number(row.strengthPointsDefault),
+      pointsPerTradeCategory: Number(row.pointsPerTradeCategory),
+      pointsIso9001: Number(row.pointsIso9001),
+      usdPerStrengthPoint: Number(row.usdPerStrengthPoint),
+      strengthTiersJson: row.strengthTiersJson
+    }
+  });
+});
+
+app.patch("/api/admin/trust-strength", requirePermission("trust_strength.edit"), async (req, res) => {
+  const body = req.body as Record<string, unknown>;
+  const prev = await prisma.trustStrengthConfig.findUnique({ where: { id: 1 } });
+
+  const experienceDefault = parseOptionalInt(body.experienceDefault);
+  const strengthPointsDefault = parseOptionalNumber(body.strengthPointsDefault);
+  const pointsPerTradeCategory = parseOptionalNumber(body.pointsPerTradeCategory);
+  const pointsIso9001 = parseOptionalNumber(body.pointsIso9001);
+  const usdPerStrengthPoint = parseOptionalNumber(body.usdPerStrengthPoint);
+
+  let tiersUpdate: Prisma.InputJsonValue | null | undefined;
+  if (Object.prototype.hasOwnProperty.call(body, "strengthTiersJson")) {
+    if (body.strengthTiersJson === null) {
+      tiersUpdate = null;
+    } else if (Array.isArray(body.strengthTiersJson)) {
+      tiersUpdate = body.strengthTiersJson as Prisma.InputJsonValue;
+    } else {
+      return res.status(400).json({ message: "strengthTiersJson must be an array or null" });
+    }
+  }
+
+  const data: Prisma.TrustStrengthConfigUpdateInput = {};
+  if (experienceDefault !== undefined && experienceDefault !== null) {
+    data.experienceDefault = experienceDefault;
+  }
+  if (strengthPointsDefault !== undefined) data.strengthPointsDefault = new Prisma.Decimal(strengthPointsDefault);
+  if (pointsPerTradeCategory !== undefined)
+    data.pointsPerTradeCategory = new Prisma.Decimal(pointsPerTradeCategory);
+  if (pointsIso9001 !== undefined) data.pointsIso9001 = new Prisma.Decimal(pointsIso9001);
+  if (usdPerStrengthPoint !== undefined) data.usdPerStrengthPoint = new Prisma.Decimal(usdPerStrengthPoint);
+  if (tiersUpdate !== undefined) {
+    data.strengthTiersJson = tiersUpdate === null ? Prisma.DbNull : tiersUpdate;
+  }
+
+  if (Object.keys(data).length === 0) {
+    const row = prev ?? (await prisma.trustStrengthConfig.findUnique({ where: { id: 1 } }));
+    if (!row) {
+      return res.status(404).json({ message: "Trust strength config not found" });
+    }
+    return res.json({
+      config: {
+        experienceDefault: row.experienceDefault,
+        strengthPointsDefault: Number(row.strengthPointsDefault),
+        pointsPerTradeCategory: Number(row.pointsPerTradeCategory),
+        pointsIso9001: Number(row.pointsIso9001),
+        usdPerStrengthPoint: Number(row.usdPerStrengthPoint),
+        strengthTiersJson: row.strengthTiersJson
+      }
+    });
+  }
+
+  const row = await prisma.trustStrengthConfig.upsert({
+    where: { id: 1 },
+    update: data,
+    create: {
+      id: 1,
+      experienceDefault:
+        experienceDefault != null ? experienceDefault : (prev?.experienceDefault ?? 45),
+      strengthPointsDefault: new Prisma.Decimal(strengthPointsDefault ?? Number(prev?.strengthPointsDefault ?? 2)),
+      pointsPerTradeCategory: new Prisma.Decimal(
+        pointsPerTradeCategory ?? Number(prev?.pointsPerTradeCategory ?? 2)
+      ),
+      pointsIso9001: new Prisma.Decimal(pointsIso9001 ?? Number(prev?.pointsIso9001 ?? 1)),
+      usdPerStrengthPoint: new Prisma.Decimal(usdPerStrengthPoint ?? Number(prev?.usdPerStrengthPoint ?? 333333)),
+      strengthTiersJson:
+        tiersUpdate !== undefined
+          ? tiersUpdate === null
+            ? Prisma.DbNull
+            : tiersUpdate
+          : prev?.strengthTiersJson === null || prev?.strengthTiersJson === undefined
+            ? Prisma.DbNull
+            : (prev.strengthTiersJson as Prisma.InputJsonValue)
+    }
+  });
+
+  res.json({
+    config: {
+      experienceDefault: row.experienceDefault,
+      strengthPointsDefault: Number(row.strengthPointsDefault),
+      pointsPerTradeCategory: Number(row.pointsPerTradeCategory),
+      pointsIso9001: Number(row.pointsIso9001),
+      usdPerStrengthPoint: Number(row.usdPerStrengthPoint),
+      strengthTiersJson: row.strengthTiersJson
+    }
+  });
+});
+
 const CATEGORY_EXPERIENCE_STATUSES = Object.values(ProfessionRequestStatus);
 
 app.get("/api/admin/category-experience-requests", requirePermission("category_experience.view"), async (req, res) => {
@@ -889,7 +1013,11 @@ app.patch(
   requirePermission("category_experience.review"),
   async (req, res) => {
     const id = req.params.id;
-    const body = req.body as { status?: string; reviewerNote?: string | null };
+    const body = req.body as {
+      status?: string;
+      reviewerNote?: string | null;
+      declaredEvidenceValueUsd?: number | null;
+    };
     const nextStatus =
       typeof body.status === "string" && CATEGORY_EXPERIENCE_STATUSES.includes(body.status as ProfessionRequestStatus)
         ? (body.status as ProfessionRequestStatus)
@@ -942,13 +1070,28 @@ app.patch(
           });
         }
 
+        const evidencePatch: { declaredEvidenceValueUsd?: Prisma.Decimal | null } = {};
+        if (nextStatus === "APPROVED" && Object.prototype.hasOwnProperty.call(body, "declaredEvidenceValueUsd")) {
+          const raw = body.declaredEvidenceValueUsd;
+          if (raw === null) {
+            evidencePatch.declaredEvidenceValueUsd = null;
+          } else {
+            const n = typeof raw === "number" ? raw : Number(raw);
+            if (!Number.isFinite(n) || n < 0) {
+              throw new Error("INVALID_EVIDENCE_USD");
+            }
+            evidencePatch.declaredEvidenceValueUsd = new Prisma.Decimal(n);
+          }
+        }
+
         return tx.categoryExperienceApprovalRequest.update({
           where: { id },
           data: {
             status: nextStatus,
             reviewerNote,
             reviewedAt: new Date(),
-            reviewedByOperatorId: operatorId
+            reviewedByOperatorId: operatorId,
+            ...evidencePatch
           },
           include: {
             user: {
@@ -964,8 +1107,15 @@ app.patch(
         });
       });
 
+      void recalculateStrengthPointsForUser(existing.userId).catch(err =>
+        console.error("[category-experience] strength recalc", err)
+      );
+
       return res.json(updated);
     } catch (e) {
+      if (e instanceof Error && e.message === "INVALID_EVIDENCE_USD") {
+        return res.status(400).json({ message: "declaredEvidenceValueUsd must be null or a non-negative number" });
+      }
       console.error("[category-experience-requests PATCH]", e);
       return res.status(500).json({ message: "Failed to update request" });
     }
